@@ -1,0 +1,44 @@
+# OTel Collector Gateway — Phase 0 最小管道
+# 数据流: observa-agent (OTLP) → batch → VictoriaMetrics remote_write
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  attributes:
+    actions:
+      - key: observaforge.phase
+        value: phase0
+        action: insert
+
+exporters:
+  prometheusremotewrite:
+    endpoint: http://victoria-metrics:8428/api/v1/write
+    tls:
+      insecure: true
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, attributes]
+      exporters: [prometheusremotewrite, debug]

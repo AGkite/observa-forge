@@ -1,0 +1,92 @@
+# Binaries & build output
+/bin/
+/dist/
+/build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+coverage.out
+coverage.html
+*.prof
+*.pprof
+/vendor/
+
+# Go workspace (optional local multi-module setup)
+go.work
+go.work.sum
+
+# Environment & secrets — never commit credentials
+.env
+.env.*
+!.env.example
+*.local
+secrets/
+*.pem
+*.key
+*.crt
+
+# Logs & runtime data
+*.log
+/logs/
+/tmp/
+/temp/
+/run/
+
+# Docker local overrides
+docker-compose.override.yml
+docker-compose.*.local.yml
+.deploy/
+
+# IDE & editors
+.idea/
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Node.js (future Console frontend)
+node_modules/
+.npm
+.pnpm-store/
+.yarn/
+dist-ssr/
+*.tsbuildinfo
+
+# Terraform / IaC (future)
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
+
+# Helm / K8s local render
+/charts/*/charts/
+rendered/
+
+# Test & benchmark artifacts
+testdata/*.actual
+__debug_bin*
+
+# AI / local tooling
+.cursor/
+*.bak

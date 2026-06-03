@@ -1,0 +1,78 @@
+# ObservaForge Phase 0 — 本地可观测性实验环境
+# 用法: docker compose -f deploy/phase0/docker-compose.yml up -d
+
+name: observa-forge-phase0
+
+services:
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics:v1.106.1
+    container_name: of-vm
+    command:
+      - "-storageDataPath=/victoria-metrics-data"
+      - "-retentionPeriod=7d"
+      - "-httpListenAddr=:8428"
+      - "-promscrape.config=/etc/prometheus/prometheus.yml"
+    volumes:
+      - vm-data:/victoria-metrics-data
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "8428:8428"
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.109.0
+    container_name: of-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Collector 自身 metrics
+      - "8889:8889"   # Prometheus exporter (debug)
+    depends_on:
+      - victoria-metrics
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: of-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: observaforge
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - victoria-metrics
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: of-postgres
+    environment:
+      POSTGRES_USER: observa
+      POSTGRES_PASSWORD: observaforge
+      POSTGRES_DB: observa_forge
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  # SNMP 模拟器 — 无真实设备时用此容器做 Phase 0 实验
+  snmpsim:
+    image: tandrup/snmpsim:latest
+    container_name: of-snmpsim
+    ports:
+      - "1161:1161/udp"
+    restart: unless-stopped
+
+volumes:
+  vm-data:
+  grafana-data:
+  pg-data:
