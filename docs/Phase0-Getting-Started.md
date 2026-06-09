@@ -1,27 +1,61 @@
-# ObservaForge Phase 0 实战指南
+# ObservaForge Phase 0 实战指南（零基础版）
 
-> **目标**: 在本地用 Docker Compose 拉起 **VictoriaMetrics + Grafana + OTel Collector + PostgreSQL**，并实现第一个 **Go 采集器**（`ping` + `snmp`），跑通「采集 → OTLP → 存储 → 查询」全链路。  
-> **预计耗时**: 4～8 小时（含阅读与实验）  
-> **前置文档**: [ObservaForge-Architecture.md](./ObservaForge-Architecture.md)
+> **目标**：在本地用 Docker Compose 拉起 **VictoriaMetrics + Grafana + OTel Collector + PostgreSQL**，并用 **Go** 编写第一个采集器（`ping` + `snmp`），亲手跑通「采集 → OTLP → 存储 → 查询」全链路。  
+> **预计耗时**：6～12 小时（含阅读、敲代码与实验；零基础建议分 2～3 天完成）  
+> **前置文档**：[ObservaForge-Architecture.md](./ObservaForge-Architecture.md)（可先跳过，Phase 0 结束后再读）
 
 ---
 
 ## 目录
 
+0. [写给零基础读者](#0-写给零基础读者)
 1. [Phase 0 要达成什么](#1-phase-0-要达成什么)
-2. [核心概念速览（必读）](#2-核心概念速览必读)
+2. [核心概念详解（必读）](#2-核心概念详解必读)
 3. [环境准备](#3-环境准备)
 4. [Step 1 — 启动基础设施](#4-step-1--启动基础设施)
-5. [Step 2 — 理解 docker-compose 与端口](#5-step-2--理解-docker-compose-与端口)
+5. [Step 2 — 理解 Docker 与端口](#5-step-2--理解-docker-与端口)
 6. [Step 3 — OTel Collector 配置详解](#6-step-3--otel-collector-配置详解)
 7. [Step 4 — VictoriaMetrics 与 PromQL](#7-step-4--victoriametrics-与-promql)
 8. [Step 5 — Grafana 可视化](#8-step-5--grafana-可视化)
 9. [Step 6 — PostgreSQL 元数据骨架](#9-step-6--postgresql-元数据骨架)
-10. [Step 7 — 编写 observa-agent（Go）](#10-step-7--编写-observa-agentgo)
+10. [Step 7 — 编写 observa-agent（Go 详解）](#10-step-7--编写-observa-agentgo-详解)
 11. [Step 8 — 联调验证清单](#11-step-8--联调验证清单)
 12. [Step 9 — PromQL 实验题](#12-step-9--promql-实验题)
 13. [Step 10 — 故障排查](#13-step-10--故障排查)
 14. [Phase 0 完成标准与下一步](#14-phase-0-完成标准与下一步)
+15. [附录](#附录)
+
+---
+
+## 0. 写给零基础读者
+
+### 0.1 这份文档适合谁？
+
+| 背景 | 说明 |
+|------|------|
+| **完全新手** | 没写过 Go、没用过 Docker、没接触过监控 — 可以跟，但请按顺序读 **第 2 章概念** 和 **第 10 章 Go 语法**，不要跳步 |
+| **会一点编程** | 有 Python/Java 经验即可；Go 语法会在 Step 7 逐行讲解 |
+| **有运维经验** | SNMP、Prometheus 可能已熟悉；可快速浏览概念章，重点做 Step 7～8 |
+
+### 0.2 你需要先知道的 5 个词
+
+| 词 | 一句话解释 | 生活类比 |
+|----|-----------|----------|
+| **Metric（指标）** | 随时间变化的数字，如「延迟 2ms」「CPU 80%」 | 体温计读数 |
+| **Agent（采集器）** | 定期去设备上「量一量」，把数字发出去 | 巡检员 |
+| **Collector（收集器）** | 接收很多 Agent 的数据，清洗后转发到数据库 | 快递分拣中心 |
+| **时序库** | 专门存「时间 + 数值」的数据库 | 带时间戳的 Excel 表 |
+| **Dashboard（仪表盘）** | 把曲线画在网页上 | 股票 K 线图 |
+
+### 0.3 学习路径建议
+
+```
+Day 1: 第 0～3 章（概念 + 装软件）→ Step 1 启动 Docker
+Day 2: Step 2～6（理解配置，在 Grafana 里看到系统自带指标）
+Day 3: Step 7（写 Go Agent）→ Step 8～9（联调 + PromQL 练习）
+```
+
+**遇到报错不要慌**：直接跳到 [Step 10 — 故障排查](#13-step-10--故障排查)，或对照 [附录 C — 术语表](#附录-c--术语表)。
 
 ---
 
@@ -42,6 +76,13 @@ Phase 0 是 **学习/验证阶段**，不追求生产可用，但要亲手跑通
 └─────────────┘                                                    └─────────────────┘
 ```
 
+**数据怎么走？（用大白话）**
+
+1. 你的 **Go 程序**（Agent）每 30 秒去 ping 一下模拟设备、读一下 SNMP。
+2. 读到的数字通过 **OTLP 协议** 发给 **OTel Collector**（一个 Docker 容器）。
+3. Collector 把数据转成 Prometheus 格式，**推送** 到 **VictoriaMetrics**（时序库）。
+4. 你在 **Grafana** 网页里写查询语句，看到延迟曲线。
+
 **Phase 0 交付物**:
 
 | 交付物 | 路径 |
@@ -50,7 +91,7 @@ Phase 0 是 **学习/验证阶段**，不追求生产可用，但要亲手跑通
 | OTel Collector 配置 | `deploy/phase0/otel-collector/config.yaml` |
 | Grafana 数据源 | 自动 provisioning |
 | PostgreSQL 设备表 | `deploy/phase0/postgres/init.sql` |
-| Go 采集 Agent | `cmd/agent/`（本指南 Step 7 创建） |
+| Go 采集 Agent | `cmd/agent/`、`internal/collector/`、`internal/config/` |
 
 **与 DCOS 的对应关系**（帮助理解「我们在重现什么」）:
 
@@ -63,63 +104,144 @@ Phase 0 是 **学习/验证阶段**，不追求生产可用，但要亲手跑通
 
 ---
 
-## 2. 核心概念速览（必读）
+## 2. 核心概念详解（必读）
 
-### 2.1 三类可观测性信号
+本章会稍长，但 **后面所有 Step 都建立在这些问题上**。建议边读边在纸上画数据流。
 
-| 信号 | 回答的问题 | Phase 0 涉及 |
-|------|-----------|--------------|
-| **Metrics（指标）** | 数值随时间变化（CPU、温度、Ping 延迟） | ✅ 主线 |
-| **Logs（日志）** | 离散事件文本 | ❌ Phase 1 引入 Loki |
-| **Traces（链路）** | 请求跨服务路径 | ❌ Phase 1 引入 Tempo |
+### 2.1 什么是「可观测性」？
 
-SRE 日常排障顺序通常是：**Metrics 发现异常 → Logs 看细节 → Traces 定位慢路径**。
+**可观测性（Observability）** = 只看系统外部输出（指标、日志、链路），就能推断内部发生了什么。
 
-### 2.2 OpenTelemetry（OTel）
+运维/ SRE 日常排障顺序通常是：
 
-OTel 是 **CNCF 可观测性标准**，解决「各语言 SDK 格式不统一」的问题。
+```
+Metrics 发现异常 → Logs 看细节 → Traces 定位慢路径
+   （数字异常）      （报错文本）      （请求路径）
+```
 
-| 概念 | 说明 |
-|------|------|
-| **SDK** | 应用/Agent 内嵌，产生 telemetry |
-| **OTLP** | OpenTelemetry Protocol，默认传输协议（gRPC 或 HTTP） |
-| **Collector** | 接收 → 处理 → 导出，类似 Logstash 之于日志 |
-| **Semantic Conventions** | 统一 metric/attribute 命名（如 `hw.temperature`） |
+### 2.2 三类信号
 
-**Phase 0 用的端口**:
+| 信号 | 回答的问题 | 例子 | Phase 0 |
+|------|-----------|------|---------|
+| **Metrics（指标）** | 数值随时间怎么变？ | CPU 80%、Ping 2ms | ✅ 主线 |
+| **Logs（日志）** | 某时刻发生了什么事件？ | `ERROR connection refused` | ❌ Phase 1 |
+| **Traces（链路）** | 一次请求经过了哪些服务？ | API → DB → Cache | ❌ Phase 1 |
 
-| 端口 | 协议 | 用途 |
-|------|------|------|
-| `4317` | gRPC | OTLP 指标/日志/链路（Agent 默认推这里） |
-| `4318` | HTTP | OTLP HTTP 备选 |
-| `8888` | HTTP | Collector 自身 Prometheus metrics |
+Phase 0 **只做 Metrics**：最简单、也最适合入门。
 
-### 2.3 Prometheus 与 VictoriaMetrics
+### 2.3 指标长什么样？
 
-**Prometheus** 拉（Pull）模型为主：Prometheus Server 主动 `scrape` 目标的 `/metrics` 端点。
-
-**VictoriaMetrics（VM）** 兼容 PromQL，但写入路径更适合 **remote_write**（Push），吞吐和压缩更好。ObservaForge 选型 VM 作为主时序库（见架构文档 ADR-001 草案）。
-
-| 操作 | URL / 命令 |
-|------|-----------|
-| 写入（remote_write） | `POST /api/v1/write` |
-| 查询（PromQL） | `GET /api/v1/query?query=...` |
-| 范围查询 | `GET /api/v1/query_range?query=...&start=...&end=...&step=15s` |
-| 查看已存 series | `GET /api/v1/series?match[]=...` |
-
-### 2.4 指标数据模型
-
-Prometheus/VM 中每条时间序列由 **metric 名 + labels** 唯一确定：
+在 Prometheus / VictoriaMetrics 里，一条时间序列 = **指标名 + 标签 + 数值**：
 
 ```
 hardware_ping_rtt_seconds{device_id="lab-snmpsim-01", site="lab"} 0.002
 │                         │                                      │
-│                         └── labels（维度）                      └── value
-└── metric name
+│                         └── labels（标签/维度，用来区分不同设备）  └── 当前值
+└── metric name（指标名）
 ```
 
-这与 DCOS `MonitorResult` 中的 `Meta.identify` + `Meta.part` + `perfs` 类似：  
-**identify → metric 名前缀，part/device → labels，perf 值 → value**。
+**类比 Excel**：
+
+| Excel | 监控世界 |
+|-------|----------|
+| 列名「延迟(ms)」 | metric name `hardware_ping_rtt_seconds` |
+| 行标签「设备 A / 机房 lab」 | labels `device_id`, `site` |
+| 单元格里的数字 | value `0.002` |
+| 每一行还有「时间戳」 | 时序库自动记录 |
+
+**为何需要 labels？** 同一指标名可以有多条序列：设备 A 的延迟、设备 B 的延迟，靠 `device_id` 区分。
+
+### 2.4 OpenTelemetry（OTel）是什么？
+
+**问题**：Java 用一种格式上报、Go 用另一种、Python 又一种 — 后端很难统一处理。
+
+**OpenTelemetry** 是 CNCF 下的 **可观测性标准**，类似「各国插座统一成 USB-C」：
+
+| 概念 | 说明 | 类比 |
+|------|------|------|
+| **SDK** | 嵌在 Agent/应用里，负责「产生」telemetry | 工厂里的传感器 |
+| **OTLP** | OpenTelemetry Protocol，传输数据的「快递单格式」 | 标准快递箱 |
+| **Collector** | 接收 → 处理 → 导出 | 快递分拣中心 |
+| **Semantic Conventions** | 统一命名，如 `device.id` | 商品条码规范 |
+
+**Phase 0 用到的端口**:
+
+| 端口 | 协议 | 用途 |
+|------|------|------|
+| `4317` | gRPC | Agent 默认把指标推到这里 |
+| `4318` | HTTP | OTLP 的 HTTP 备选 |
+| `8888` | HTTP | Collector 自身的运行指标 |
+
+**gRPC 和 HTTP 的区别（入门够用）**：
+
+- **HTTP**：浏览器访问网页用的协议，文本/JSON 为主。
+- **gRPC**：Google 出的高性能 RPC，二进制、适合服务间大量传数据。OTel 默认用 gRPC 传指标。
+
+Agent 连 Collector 时写 `localhost:4317`，**不要**加 `http://` 前缀（那是 HTTP 的写法）。
+
+### 2.5 Prometheus 与 VictoriaMetrics
+
+**Prometheus** 经典模型是 **Pull（拉）**：Prometheus Server 每隔一段时间去目标机器的 `/metrics` 网页抓数据。
+
+**VictoriaMetrics（VM）** 兼容 PromQL 查询语法，但写入更适合 **Push（推）** — Agent/Collector 主动 POST 过来。压缩好、吞吐高，ObservaForge 选它做主时序库。
+
+| 操作 | URL |
+|------|-----|
+| 写入（remote_write） | `POST /api/v1/write` |
+| 即时查询 | `GET /api/v1/query?query=...` |
+| 范围查询（画曲线） | `GET /api/v1/query_range?query=...&start=...&end=...&step=15s` |
+| 列出已有指标名 | `GET /api/v1/label/__name__/values` |
+
+**PromQL** = Prometheus Query Language，用来问时序库「给我某指标过去 5 分钟的平均值」等。Step 4 和 Step 9 会练。
+
+### 2.6 Docker 与 Docker Compose（入门）
+
+**Docker** 把应用和它依赖的环境打包成 **镜像（Image）**，运行起来叫 **容器（Container）**。
+
+**Docker Compose** 用一个 YAML 文件描述「要起哪些容器、端口、卷」，一条命令全部启动。
+
+| 概念 | 说明 |
+|------|------|
+| **镜像 Image** | 只读模板，如 `grafana/grafana:11.3.0` |
+| **容器 Container** | 镜像的运行实例，有独立进程和网络 |
+| **端口映射** | `8428:8428` = 宿主机 8428 → 容器内 8428 |
+| **Volume（卷）** | 持久化磁盘，容器删了数据还在 |
+| **网络** | 同一 compose 里的容器可通过 **服务名** 互访，如 `http://victoria-metrics:8428` |
+
+**重要**：在 **宿主机**（你的 Windows）上访问用 `localhost:8428`；在 **Grafana 容器内** 访问 VM 要用 `victoria-metrics:8428`（服务名，不是 localhost）。
+
+### 2.7 SNMP 入门（Phase 0 会用到）
+
+**SNMP**（Simple Network Management Protocol）是网络设备上常用的「读指标」协议。
+
+| 概念 | 说明 |
+|------|------|
+| **Agent** | 设备上响应 SNMP 请求的进程（不是我们的 Go Agent，名字撞了） |
+| **OID** | 对象标识符，像树形地址，如 `1.3.6.1.2.1.1.3.0` = sysUpTime |
+| **Community** | v2c 的「口令」，Phase 0 模拟器用 `public` |
+| **Get** | 读一个或多个 OID 的当前值 |
+
+Phase 0 没有真实交换机，用 **snmpsim** 容器模拟 `127.0.0.1:1161` 上的 SNMP Agent（端口 **1161** 而非标准 161，避免和系统冲突）。
+
+### 2.8 Go 语言速览（Step 7 前必读）
+
+若你已有 Java/Python 经验，对照下表即可；完全新手请配合 Step 7 逐行看。
+
+| Go 语法 | 含义 | 示例 |
+|---------|------|------|
+| `package xxx` | 文件属于哪个包（类似 Java package） | `package main` |
+| `import (...)` | 导入依赖 | `import "fmt"` |
+| `func Name(...) 返回类型` | 函数 | `func Add(a, b int) int` |
+| `type X struct { ... }` | 结构体，字段集合 | `type Config struct { Interval time.Duration }` |
+| `:=` | 短变量声明，类型自动推断 | `x := 3` |
+| `*` | 指针；`&x` 取地址 | 函数参数传大对象时常用指针 |
+| `[]T` | 切片，动态数组 | `[]Target` |
+| `if err != nil` | Go 错误处理惯例 | 几乎每步都检查 `err` |
+| `go xxx()` | 启动 goroutine（轻量线程） | Phase 0 未用，后续会遇 |
+| `defer` | 函数退出前执行 | 用于关闭连接、`Shutdown` |
+| `context.Context` | 传递取消信号、超时 | `ctx, cancel := context.WithTimeout(...)` |
+
+**Go Module（模块）**：Go 1.11+ 的依赖管理，根目录 `go.mod` 声明模块路径和依赖版本，类似 Node 的 `package.json`。
 
 ---
 
@@ -138,24 +260,26 @@ hardware_ping_rtt_seconds{device_id="lab-snmpsim-01", site="lab"} 0.002
 
 #### Docker Desktop（Windows）
 
-```powershell
-# 检查 Docker 是否可用
-docker version
+1. 安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，安装时勾选 **Use WSL 2**。
+2. 打开 Docker Desktop → **Settings → Resources → Memory**，设为 **≥ 4GB**。
+3. 验证：
 
-# 检查 Compose V2（注意是 "docker compose" 不是 "docker-compose"）
+```powershell
+docker version
 docker compose version
 ```
 
-**参数说明**:
+| 命令 | 期望结果 | 若失败 |
+|------|----------|--------|
+| `docker version` | Client 和 Server 都有版本号 | 启动 Docker Desktop |
+| `docker compose version` | ≥ 2.20 | 更新 Docker Desktop |
 
-| 命令 | 输出含义 |
-|------|----------|
-| `docker version` | Client/Server 版本；Server 报错说明 Docker Desktop 未启动 |
-| `docker compose version` | 需 ≥ 2.20；V2 集成在 Docker CLI 中 |
-
-Windows 需在 Docker Desktop → Settings → Resources 中分配 **Memory ≥ 4GB**，并启用 **WSL2 backend**。
+> **注意**：现代 Docker 用 `docker compose`（中间有空格），不是旧版 `docker-compose`（带连字符）。
 
 #### Go 1.22+
+
+1. 安装：https://go.dev/dl/
+2. 验证：
 
 ```powershell
 go version
@@ -166,8 +290,8 @@ go env GOPATH GO111MODULE
 
 | 变量 | 说明 |
 |------|------|
-| `GOPATH` | Go 工作区路径，默认 `%USERPROFILE%\go` |
-| `GO111MODULE` | 应为 `on`（Go 1.16+ 默认） |
+| `GOPATH` | Go 工作区，默认 `%USERPROFILE%\go` |
+| `GO111MODULE` | 应为 `on`（模块模式） |
 
 #### Git
 
@@ -176,14 +300,12 @@ git clone https://github.com/<your-org>/observa-forge.git
 cd observa-forge
 ```
 
+若已有仓库，直接进入项目根目录即可。
+
 #### 可选工具
 
 ```powershell
-# Windows 包管理
-winget install Schniz.fnm          # Node（后续 Console 用）
-winget install PostgreSQL.psql     # psql 客户端
-
-# 或用 Docker 内 psql（本指南默认用 docker exec）
+winget install PostgreSQL.psql     # psql 客户端（也可只用 docker exec）
 ```
 
 ### 3.3 克隆后目录结构
@@ -194,7 +316,11 @@ observa-forge/
 ├── docs/
 │   ├── ObservaForge-Architecture.md
 │   └── Phase0-Getting-Started.md   ← 本文档
-├── cmd/agent/              ← Step 7 创建
+├── cmd/agent/              ← Step 7 编写/运行
+├── internal/
+│   ├── collector/          ← 采集逻辑
+│   └── config/             ← 配置
+├── go.mod / go.sum         ← Go 依赖
 └── README.md
 ```
 
@@ -202,31 +328,35 @@ observa-forge/
 
 ## 4. Step 1 — 启动基础设施
 
-### 4.1 进入 Phase 0 部署目录
+### 4.1 进入部署目录
 
 ```powershell
 cd c:\work\observa-forge\deploy\phase0
 ```
 
+路径请按你本机实际位置修改。
+
 ### 4.2 拉取镜像并启动
 
-```powershell
-# 前台启动（首次建议，方便看日志）
-docker compose up
+**首次建议前台启动**（能看到实时日志，Ctrl+C 可停止）：
 
-# 或后台启动
+```powershell
+docker compose up
+```
+
+熟悉后可用后台模式：
+
+```powershell
 docker compose up -d
 ```
 
-**`docker compose up` 参数解析**:
-
 | 参数 | 含义 |
 |------|------|
-| `-d` / `--detach` | 后台运行，不占用当前终端 |
-| `--build` | 启动前构建本地 Dockerfile（Phase 0 无自定义镜像，暂不需要） |
-| `-f <file>` | 指定 compose 文件路径 |
-| `--pull always` | 每次启动拉最新镜像 |
+| `-d` / `--detach` | 后台运行 |
+| `--pull always` | 每次拉最新镜像 |
 | `up` | 创建网络、卷、容器并启动 |
+
+第一次会下载几个镜像（几百 MB 到 1GB+），视网络情况而定，请耐心等待。
 
 ### 4.3 检查容器状态
 
@@ -234,59 +364,74 @@ docker compose up -d
 docker compose ps
 ```
 
-期望输出（STATE 均为 `running`）:
+期望 **STATE 均为 `running`**：
 
-| NAME | PORTS | 说明 |
-|------|-------|------|
-| `of-vm` | `8428` | VictoriaMetrics |
+| 容器名 | 端口 | 说明 |
+|--------|------|------|
+| `of-vm` | `8428` | VictoriaMetrics 时序库 |
 | `of-otel-collector` | `4317-4318`, `8888` | OTel Collector |
-| `of-grafana` | `3000` | Grafana |
+| `of-grafana` | `3000` | Grafana 网页 |
 | `of-postgres` | `5432` | PostgreSQL |
 | `of-snmpsim` | `1161/udp` | SNMP 模拟器 |
 
+查看某个服务日志：
+
 ```powershell
-# 查看某个服务日志
 docker compose logs otel-collector --tail 50 -f
 ```
 
-**`docker compose logs` 参数**:
-
 | 参数 | 含义 |
 |------|------|
-| `<service>` | 服务名（compose 文件中 `services:` 下的 key） |
-| `--tail 50` | 只显示最后 50 行 |
-| `-f` / `--follow` | 持续跟踪新日志（Ctrl+C 退出） |
-| `--since 10m` | 只看最近 10 分钟 |
+| `--tail 50` | 只看最后 50 行 |
+| `-f` | 持续跟踪（Ctrl+C 退出） |
 
-### 4.4 健康检查命令
+### 4.4 健康检查
 
 ```powershell
-# VictoriaMetrics 健康
+# VictoriaMetrics
 curl http://localhost:8428/health
 # 期望: OK
 
-# OTel Collector 健康扩展
-curl http://localhost:13133/
-# 期望: JSON status "Server available"
+# OTel Collector 自身指标（能访问说明 Collector 在跑）
+curl http://localhost:8888/metrics
 
-# Grafana 健康
+# Grafana
 curl http://localhost:3000/api/health
 # 期望: {"database":"ok",...}
 ```
 
-PowerShell 若无 `curl`，可用：
+PowerShell 若 `curl` 行为异常（Windows 上可能是 Invoke-WebRequest 别名），可用：
 
 ```powershell
 Invoke-WebRequest -Uri http://localhost:8428/health -UseBasicParsing
 ```
 
+> **说明**：Collector 配置了 `13133` 健康检查端口，但 Phase 0 的 compose **未映射到宿主机**。在主机上请用 `8888/metrics` 或 `docker compose logs` 判断 Collector 是否正常。
+
 ---
 
-## 5. Step 2 — 理解 docker-compose 与端口
+## 5. Step 2 — 理解 Docker 与端口
 
-配置文件: `deploy/phase0/docker-compose.yml`
+配置文件：`deploy/phase0/docker-compose.yml`
 
-### 5.1 VictoriaMetrics 服务
+### 5.1 整体结构（YAML 入门）
+
+```yaml
+name: observa-forge-phase0    # 项目名，影响默认网络名
+
+services:                      # 下面每个 key 是一个服务
+  victoria-metrics:            # 服务名（容器间 DNS 用这个名字）
+    image: victoriametrics/... # 用哪个镜像
+    ports:
+      - "8428:8428"            # 宿主机:容器
+    volumes:                   # 挂载文件或持久化卷
+      - vm-data:/victoria-metrics-data
+
+volumes:                       # 声明具名卷
+  vm-data:
+```
+
+### 5.2 VictoriaMetrics
 
 ```yaml
 command:
@@ -296,14 +441,14 @@ command:
   - "-promscrape.config=/etc/prometheus/prometheus.yml"
 ```
 
-| 启动参数 | 含义 |
-|----------|------|
-| `-storageDataPath` | 数据文件目录（挂载 Docker volume 持久化） |
-| `-retentionPeriod=7d` | 数据保留 7 天（Phase 0 实验足够） |
-| `-httpListenAddr=:8428` | HTTP 监听地址（查询 + 写入 + `/metrics`） |
-| `-promscrape.config` | 内置 scrape 配置，Phase 0 用于采集 VM 自身和 OTel metrics |
+| 参数 | 含义 |
+|------|------|
+| `-storageDataPath` | 数据存哪（Docker volume 持久化） |
+| `-retentionPeriod=7d` | 只保留 7 天（实验够用） |
+| `-httpListenAddr=:8428` | 监听 8428（查询 + 写入 + `/metrics`） |
+| `-promscrape.config` | 内置抓取配置，Phase 0 用于 VM 自身和 OTel 指标 |
 
-### 5.2 OTel Collector 服务
+### 5.3 OTel Collector
 
 ```yaml
 image: otel/opentelemetry-collector-contrib:0.109.0
@@ -312,10 +457,10 @@ command: ["--config=/etc/otelcol/config.yaml"]
 
 | 项 | 说明 |
 |----|------|
-| `contrib` 镜像 | 包含 `prometheusremotewrite` 等扩展组件；核心版不含 |
-| `--config` | Collector 配置文件路径（唯一必填启动参数） |
+| `contrib` | **扩展版**镜像，含 `prometheusremotewrite`；核心版没有 |
+| `--config` | 配置文件路径（启动必填） |
 
-### 5.3 Grafana 服务
+### 5.4 Grafana
 
 ```yaml
 environment:
@@ -323,15 +468,9 @@ environment:
   GF_SECURITY_ADMIN_PASSWORD: observaforge
 ```
 
-| 环境变量 | 含义 |
-|----------|------|
-| `GF_SECURITY_ADMIN_USER` | 管理员用户名 |
-| `GF_SECURITY_ADMIN_PASSWORD` | 管理员密码（Phase 0 明文，生产必须用 Secret） |
-| `GF_USERS_ALLOW_SIGN_UP` | 禁止自助注册 |
+浏览器打开：**http://localhost:3000** → 用户名 `admin`，密码 `observaforge`
 
-登录: http://localhost:3000 → `admin` / `observaforge`
-
-### 5.4 PostgreSQL 服务
+### 5.5 PostgreSQL
 
 ```yaml
 environment:
@@ -340,54 +479,48 @@ environment:
   POSTGRES_DB: observa_forge
 ```
 
-| 环境变量 | 含义 |
-|----------|------|
-| `POSTGRES_USER` | 超级用户（Phase 0 简化） |
-| `POSTGRES_DB` | 启动时自动创建的数据库名 |
-| `init.sql` | 首次启动时自动执行（`docker-entrypoint-initdb.d/`） |
+`init.sql` 在 **首次** 创建数据卷时自动执行，插入样例设备。
 
-### 5.5 snmpsim（SNMP 模拟器）
+### 5.6 snmpsim（SNMP 模拟器）
 
-无真实交换机/服务器 SNMP 时，用此容器模拟 **`127.0.0.1:1161`** 上的 SNMP Agent。
+模拟 **`127.0.0.1:1161`** 上的 SNMP。Go Agent 在 **宿主机** 运行，所以 Endpoint 写 `127.0.0.1:1161`（compose 已把 UDP 1161 映射到主机）。
+
+测试 SNMP（可选，需网络工具容器）：
 
 ```powershell
-# 宿主机测试 SNMP（需安装 Net-SNMP 工具，或用 Docker）
-docker run --rm -it --network observa-forge-phase0_default nicolaka/netshoot \
+docker run --rm -it --network observa-forge-phase0_default nicolaka/netshoot `
   snmpwalk -v2c -c public host.docker.internal:1161 1.3.6.1.2.1.1
 ```
-
-**`snmpwalk` 参数**:
 
 | 参数 | 含义 |
 |------|------|
 | `-v2c` | SNMP 版本 2c |
-| `-c public` | Community 字符串（口令，v2c 无加密） |
-| `host:1161` | Agent 地址；容器内访问宿主机 snmpsim 用 `host.docker.internal:1161` |
-| `1.3.6.1.2.1.1` | OID 子树（`system` 组，含 sysDescr、sysUpTime 等） |
+| `-c public` | Community 口令 |
+| `1.3.6.1.2.1.1` | system 组 OID（含 sysDescr、sysUpTime） |
 
 ---
 
 ## 6. Step 3 — OTel Collector 配置详解
 
-配置文件: `deploy/phase0/otel-collector/config.yaml`
+配置文件：`deploy/phase0/otel-collector/config.yaml`
 
-### 6.1 整体结构
+### 6.1 四段式结构
+
+Collector 配置固定分成四块 + service：
 
 ```yaml
 receivers:    # 数据从哪来
 processors:   # 中间怎么处理
 exporters:    # 数据往哪去
-extensions:   # 扩展（健康检查、pprof 等）
-service:      # 组装 pipeline
+extensions:   # 健康检查等插件
+service:      # 把上面拼成 pipeline
 ```
 
-**Pipeline** 是有向图：`receiver → processor(s) → exporter(s)`。
-
-Phase 0 只有一条 metrics pipeline:
+**Pipeline** = 有向流水线：
 
 ```
-otlp → memory_limiter → batch → attributes → prometheusremotewrite
-                                            → debug
+otlp → memory_limiter → batch → attributes → prometheusremotewrite → VictoriaMetrics
+                                            → debug（打印到日志，方便调试）
 ```
 
 ### 6.2 receivers.otlp
@@ -404,12 +537,12 @@ receivers:
 
 | 字段 | 含义 |
 |------|------|
-| `0.0.0.0:4317` | 监听所有网卡；Agent 在宿主机运行时连 `localhost:4317` |
-| gRPC vs HTTP | Go SDK 默认 gRPC；调试用 HTTP 可用 `4318` |
+| `0.0.0.0` | 监听所有网卡（容器内必须这样，否则外部连不进来） |
+| 宿主机 Agent | 连接 `localhost:4317` |
 
 ### 6.3 processors
 
-#### batch
+#### batch — 批量发送
 
 ```yaml
 batch:
@@ -419,23 +552,16 @@ batch:
 
 | 字段 | 含义 |
 |------|------|
-| `timeout` | 最长等待 5 秒即发送一批（即使未满） |
-| `send_batch_size` | 单批最多 512 条，减少 HTTP 请求次数 |
+| `timeout` | 最多等 5 秒就发一批（即使没满） |
+| `send_batch_size` | 单批最多 512 个点 |
 
-**为何需要 batch**: 每条 metric 单独 POST 会导致 VM 写入压力过大；批量可提升吞吐 10～100 倍。
+**为何需要**：每条 metric 单独 POST 会让 VM 压力巨大；批量可显著提吞吐。
 
-#### memory_limiter
+#### memory_limiter — 防止 OOM
 
-```yaml
-memory_limiter:
-  check_interval: 1s
-  limit_mib: 256
-  spike_limit_mib: 64
-```
+超过内存上限会 **反压（backpressure）**，暂时拒绝新数据，避免 Collector 被系统 Kill。
 
-防止 Collector 内存暴涨被 OOM Kill；超过 `limit_mib` 会反压（backpressure）拒绝新数据。
-
-#### attributes
+#### attributes — 打标签
 
 ```yaml
 attributes:
@@ -445,7 +571,7 @@ attributes:
       action: insert
 ```
 
-给所有经过的 metric 插入固定 label，便于 Grafana 中过滤实验数据。
+给所有经过的 metric 插入 label `observaforge_phase=phase0`（导出到 Prometheus 时 `.` 变 `_`），便于在 Grafana 里过滤实验数据。
 
 ### 6.4 exporters.prometheusremotewrite
 
@@ -459,38 +585,32 @@ exporters:
 
 | 字段 | 含义 |
 |------|------|
-| `endpoint` | VM 的 remote_write URL；注意容器内用服务名 `victoria-metrics` |
-| `tls.insecure: true` | 跳过 TLS 验证（Phase 0 无 HTTPS） |
+| `victoria-metrics` | **Docker 服务名**，不是 localhost |
+| `insecure: true` | Phase 0 无 HTTPS，跳过 TLS 校验 |
 
-**数据格式**: Prometheus remote write protocol（Protobuf + Snappy 压缩），OTel Collector 自动将 OTLP metrics 转换。
+Collector 会把 OTLP 格式 **自动转换** 为 Prometheus remote write（Protobuf + Snappy）。
 
 ### 6.5 验证 Collector 收到数据
 
-启动 Agent 后，查看 Collector 日志：
+启动 Agent 后：
 
 ```powershell
 docker compose logs otel-collector -f
 ```
 
-应看到类似：
+应看到 `Metrics` / `debug` 相关输出。
 
-```
-MetricsExporter ... "resource metrics": ...
-```
-
-也可查 Collector 自身 metrics:
+查 Collector 自身指标：
 
 ```powershell
 curl http://localhost:8888/metrics | Select-String "otelcol_receiver"
 ```
 
-关键指标:
-
 | 指标 | 含义 |
 |------|------|
-| `otelcol_receiver_accepted_metric_points` | 成功接收的 metric 点数 |
-| `otelcol_exporter_sent_metric_points` | 成功导出的点数 |
-| `otelcol_exporter_send_failed_metric_points` | 导出失败（应 = 0） |
+| `otelcol_receiver_accepted_metric_points` | 成功接收的点数 |
+| `otelcol_exporter_sent_metric_points` | 成功导出点数 |
+| `otelcol_exporter_send_failed_metric_points` | 导出失败（应为 0） |
 
 ---
 
@@ -498,48 +618,54 @@ curl http://localhost:8888/metrics | Select-String "otelcol_receiver"
 
 ### 7.1 查询 API
 
-```powershell
-# 即时查询 — 当前值
-curl --globoff "http://localhost:8428/api/v1/query?query=up"
+**即时查询** — 当前这一刻的值：
 
-# 范围查询 — 过去 1 小时，每 15 秒一个点
+```powershell
+curl --globoff "http://localhost:8428/api/v1/query?query=up"
+```
+
+**范围查询** — 过去一段时间，用于画曲线：
+
+```powershell
 $end = [int][double]::Parse((Get-Date -UFormat %s))
 $start = $end - 3600
 curl --globoff "http://localhost:8428/api/v1/query_range?query=up&start=$start&end=$end&step=15"
 ```
 
-**`/api/v1/query` 参数**:
+| API | 用途 |
+|-----|------|
+| `/api/v1/query` | 一个时间点 |
+| `/api/v1/query_range` | 时间范围 + 步长 `step` |
 
-| 参数 | 必填 | 含义 |
-|------|------|------|
-| `query` | ✅ | PromQL 表达式 |
-| `time` | ❌ | 评估时间点（Unix 秒），默认 now |
-| `dedup` | ❌ | 去重开关 |
+PowerShell 里 URL 含 `{}` 时加 `--globoff`，避免花括号被 shell 误解析。
 
-**`/api/v1/query_range` 参数**:
+### 7.2 查看已有指标
 
-| 参数 | 必填 | 含义 |
-|------|------|------|
-| `query` | ✅ | PromQL |
-| `start` | ✅ | 范围起始（Unix 秒） |
-| `end` | ✅ | 范围结束 |
-| `step` | ✅ | 步长（如 `15s`、`1m`） |
-
-### 7.2 查看所有 label
+Agent 跑起来之后：
 
 ```powershell
-curl "http://localhost:8428/api/v1/labels"
+curl "http://localhost:8428/api/v1/label/__name__/values"
 curl --globoff "http://localhost:8428/api/v1/series?match[]={observaforge_phase=\"phase0\"}"
 ```
 
-### 7.3 常用 PromQL 速查
+### 7.3 PromQL 入门
 
-| 表达式 | 含义 |
+| 表达式 | 类型 | 含义 |
+|--------|------|------|
+| `hardware_ping_success` | 即时向量 | 所有设备的 ping 成功指标 |
+| `hardware_ping_success{device_id="lab-snmpsim-01"}` | 带过滤 | 只查一台设备 |
+| `hardware_ping_rtt_seconds[5m]` | 范围向量 | 过去 5 分钟每个采样点 |
+| `avg_over_time(hardware_ping_rtt_seconds[5m])` | 函数 | 5 分钟内 RTT 平均值 |
+| `rate(counter[1m])` | 函数 | Counter 每秒增速（用于「累计计数」类指标） |
+
+Phase 0 Agent 上报后常见的 metric 名（OTel 的 `.` 会变成 `_`，单位可能加后缀）：
+
+| 查询名 | 含义 |
 |--------|------|
-| `up` | scrape 目标是否存活（1=正常） |
-| `hardware_ping_success` | Phase 0 Agent 上报的 Ping 状态 |
-| `rate(hardware_snmp_sysuptime[5m])` | sysUpTime 变化率（应用需谨慎，sysUpTime 是累计值） |
-| `{__name__=~"hardware_.*"}` | 所有 hardware_ 前缀指标 |
+| `hardware_ping_success` | Ping 是否成功（1/0） |
+| `hardware_ping_rtt_seconds` | 往返延迟（秒） |
+| `hardware_snmp_success` | SNMP 是否成功 |
+| `hardware_snmp_sysuptime_seconds` | 设备运行时间 |
 
 ---
 
@@ -548,24 +674,21 @@ curl --globoff "http://localhost:8428/api/v1/series?match[]={observaforge_phase=
 ### 8.1 登录与数据源
 
 1. 打开 http://localhost:3000
-2. 用户名 `admin`，密码 `observaforge`
-3. 左侧 **Connections → Data sources → VictoriaMetrics** 应已自动配置（provisioning）
+2. `admin` / `observaforge`
+3. **Connections → Data sources → VictoriaMetrics** 应已自动配置
 
-数据源 URL 为 `http://victoria-metrics:8428`（容器内网络），**不要**改成 `localhost`（那是 Grafana 容器自身）。
+数据源 URL 为 `http://victoria-metrics:8428`（**容器内**网络）。若改成 `localhost`，Grafana 会连到自己容器内部，必然失败。
 
 ### 8.2 Explore 快速查指标
 
-1. 左侧 **Explore**
+1. 左侧 **Explore**（compass 图标）
 2. 数据源选 **VictoriaMetrics**
-3. 输入 PromQL:
+3. 输入 PromQL：`hardware_ping_rtt_seconds`
+4. **Run query**
 
-```promql
-hardware_ping_rtt_seconds
-```
+右上角时间范围选 **Last 15 minutes**，并确认 Agent 已在运行。
 
-4. 点击 **Run query**
-
-### 8.3 创建 Phase 0 Dashboard 面板
+### 8.3 创建 Dashboard 面板
 
 **Panel 1 — Ping 延迟（Time series）**:
 
@@ -585,70 +708,65 @@ hardware_ping_success{device_id="lab-snmpsim-01"}
 hardware_snmp_sysuptime_seconds{device_id="lab-snmpsim-01"}
 ```
 
-**Panel 4 — OTel Collector 吞吐**:
+**Panel 4 — Collector 吞吐**:
 
 ```promql
 rate(otelcol_receiver_accepted_metric_points[1m])
 ```
 
-| Grafana 选项 | 建议值 |
-|--------------|--------|
-| Min interval | `15s`（与采集间隔对齐） |
+| 选项 | 建议 |
+|------|------|
+| Min interval | `15s` |
 | Legend | `{{device_id}} - {{monitor_identify}}` |
-| Unit（Ping RTT） | seconds (s) |
-| Unit（sysUpTime） | seconds (s) |
+| Unit（RTT） | seconds (s) |
 
 ---
 
 ## 9. Step 6 — PostgreSQL 元数据骨架
 
-Phase 0 只验证 **元数据表存在**，Phase 2 的 `observa-control` 会读写此库。
+Phase 0 只验证 **元数据表存在**；Phase 2 的 Control Plane 会读写此库。Agent 暂时 **不连数据库**，但 `device_id` 应与表中 `device_code` 一致，便于以后关联。
 
-### 9.1 连接数据库
+### 9.1 连接
 
 ```powershell
 docker exec -it of-postgres psql -U observa -d observa_forge
 ```
 
-**`psql` 启动参数**:
-
-| 参数 | 含义 |
-|------|------|
-| `-U observa` | 用户名 |
-| `-d observa_forge` | 数据库名 |
-| `-it` | 交互 + TTY |
-
-### 9.2 验证表与样例数据
+### 9.2 验证
 
 ```sql
--- 查看设备表
 SELECT * FROM devices;
-
--- 期望一行: lab-snmpsim-01 / SNMP Simulator
+-- 期望: lab-snmpsim-01 / SNMP Simulator
 ```
 
-### 9.3 与 DCOS Device 的映射
-
-| PostgreSQL 列 | DCOS `Device` 字段 |
-|---------------|-------------------|
-| `device_code` | 设备唯一编码 |
-| `node_class` | `nodeclass` |
+| 列 | 含义 |
+|----|------|
+| `device_code` | 设备唯一编码（= Agent 的 device_id） |
+| `node_class` | 设备类型 |
 | `endpoint` | IP:Port |
 | `site` | 机房/站点 |
 
-Phase 0 Agent 的 `device_id` label 应与 `device_code` 一致，便于后续 Control Plane 关联。
-
-退出 psql: `\q`
+退出：`\q`
 
 ---
 
-## 10. Step 7 — 编写 observa-agent（Go）
+## 10. Step 7 — 编写 observa-agent（Go 详解）
 
-这是 Phase 0 的核心：**第一个 Go 采集器**，实现 `ping` + `snmp`（sysDescr/sysUpTime），经 OTLP 上报。
+本章是 Phase 0 **核心**：从零理解并实现采集器。若仓库已有代码，建议 **先删或改名** `cmd/agent` 和 `internal/`，再跟着敲一遍。
 
-### 10.1 初始化 Go 模块
+### 10.1 程序要做什么？（伪代码）
 
-在项目根目录:
+```
+每隔 30 秒:
+  对每个目标设备:
+    1. TCP 连接 host:port，测是否通、耗时多少 → 记为 ping 指标
+    2. SNMP Get sysDescr、sysUpTime → 记为 snmp 指标
+    3. 通过 OTLP 发给 Collector
+```
+
+### 10.2 初始化 Go 模块
+
+在项目 **根目录**：
 
 ```powershell
 cd c:\work\observa-forge
@@ -656,7 +774,13 @@ cd c:\work\observa-forge
 go mod init github.com/observa-forge/observa-forge
 ```
 
-### 10.2 安装依赖
+`go mod init` 后面的路径是 **模块名**，import 自己代码时要用它，例如：
+
+```go
+import "github.com/observa-forge/observa-forge/internal/config"
+```
+
+### 10.3 安装依赖
 
 ```powershell
 go get go.opentelemetry.io/otel@v1.32.0
@@ -667,30 +791,43 @@ go get github.com/gosnmp/gosnmp@v1.38.0
 
 | 依赖 | 用途 |
 |------|------|
-| `otel` | OpenTelemetry API |
-| `otlpmetricgrpc` | OTLP gRPC 导出器 |
-| `sdk/metric` | MeterProvider、PeriodicReader |
-| `gosnmp` | SNMP 协议客户端 |
+| `otel` | OpenTelemetry API（创建 Gauge、Record 值） |
+| `otlpmetricgrpc` | 经 gRPC 把指标发到 Collector |
+| `sdk/metric` | MeterProvider、PeriodicReader（定时导出） |
+| `gosnmp` | SNMP 客户端 |
 
-### 10.3 创建目录
+### 10.4 创建目录
 
 ```powershell
 mkdir -Force cmd\agent, internal\collector, internal\config
 ```
 
-### 10.4 配置文件 `internal/config/config.go`
+Go 约定：
+
+- `cmd/xxx/main.go` — 可执行程序入口
+- `internal/yyy` — 仅本项目内 import 的包（外部项目不能引用）
+
+### 10.5 配置文件 `internal/config/config.go`
+
+**作用**：集中管理 OTLP 地址、采集间隔、目标设备列表；支持环境变量覆盖。
 
 ```go
 package config
 
-import "time"
+import (
+	"os"
+	"time"
+)
 
+// Target 表示一个被监测设备
 type Target struct {
-	DeviceID   string
-	Endpoint   string // host:port
-	SNMPCommunity string
+	DeviceID      string // 设备 ID，会写到 metric label
+	Endpoint      string // host:port，如 127.0.0.1:1161
+	SNMPCommunity string // SNMP v2c community
+	Site          string // 机房/站点 label
 }
 
+// Config 是 Agent 全局配置
 type Config struct {
 	OTLPEndpoint string
 	Interval     time.Duration
@@ -699,68 +836,362 @@ type Config struct {
 
 func Default() Config {
 	return Config{
-		OTLPEndpoint: "localhost:4317",
-		Interval:     30 * time.Second,
+		OTLPEndpoint: envOr("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317"),
+		Interval:     envDuration("OBSERVA_INTERVAL", 30*time.Second),
 		Targets: []Target{
 			{
-				DeviceID:      "lab-snmpsim-01",
-				Endpoint:      "127.0.0.1:1161",
-				SNMPCommunity: "public",
+				DeviceID:      envOr("OBSERVA_DEVICE_ID", "lab-snmpsim-01"),
+				Endpoint:      envOr("OBSERVA_SNMP_TARGET", "127.0.0.1:1161"),
+				SNMPCommunity: envOr("OBSERVA_SNMP_COMMUNITY", "public"),
+				Site:          envOr("OBSERVA_SITE", "lab"),
 			},
 		},
 	}
 }
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return fallback
+}
 ```
 
-### 10.5 Ping 与 SNMP 采集器 `internal/collector/collector.go`
+**语法说明**：
 
-Phase 0 将 ping（TCP 探测）与 SNMP 采集放在同一文件，完整代码见仓库 `internal/collector/collector.go`。
-> - `1.3.6.1.2.1.1.1.0` → `sysDescr`（系统描述）
-> - `1.3.6.1.2.1.1.3.0` → `sysUpTime`（运行时间，TimeTicks）
+| 代码 | 解释 |
+|------|------|
+| `type Target struct { ... }` | 定义结构体；字段大写开头 = 包外可访问 |
+| `[]Target` | Target 的切片（动态列表） |
+| `30 * time.Second` | 常量乘法，得到 `time.Duration` |
+| `envOr(...)` | 读环境变量，没有则用默认值 |
+| `time.ParseDuration("30s")` | 解析 `30s`、`5m` 这类字符串 |
 
-### 10.6 主程序 `cmd/agent/main.go`
+### 10.6 采集逻辑 `internal/collector/collector.go`
 
-```powershell
-# 从仓库复制完整 main.go 后执行:
-go run ./cmd/agent
+**作用**：真正去「探测设备」；与 OTel 无关，方便单元测试。
+
+```go
+package collector
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"strconv"
+	"time"
+
+	"github.com/gosnmp/gosnmp"
+)
+
+// PingResult 表示一次连通性探测结果
+type PingResult struct {
+	Success bool
+	RTT     float64 // 秒
+}
+
+// TCPProbe 用 TCP 连接代替 ICMP Ping（Windows 上 Ping 常需管理员权限）
+func TCPProbe(ctx context.Context, hostPort string, timeout time.Duration) PingResult {
+	start := time.Now()
+	d := net.Dialer{Timeout: timeout}
+	conn, err := d.DialContext(ctx, "tcp", hostPort)
+	if err != nil {
+		return PingResult{Success: false, RTT: 0}
+	}
+	_ = conn.Close()
+	return PingResult{Success: true, RTT: time.Since(start).Seconds()}
+}
 ```
 
-**环境变量（可选覆盖）**:
+**为何用 TCP 而不是 ICMP Ping？**
 
-| 变量 | 默认 | 含义 |
-|------|------|------|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC 地址 |
-| `OBSERVA_INTERVAL` | `30s` | 采集间隔 |
-| `OBSERVA_SNMP_TARGET` | `127.0.0.1:1161` | SNMP 目标 |
-| `OBSERVA_DEVICE_ID` | `lab-snmpsim-01` | device_id label |
+- 标准 `ping` 用 ICMP，Windows 上常需管理员权限。
+- snmpsim 在 **1161/UDP** 监听 SNMP，但 **TCP 连接同一端口** 也能判断「端口是否可达、网络是否通」，Phase 0 足够。
 
-**运行命令**:
+```go
+type SNMPSystem struct {
+	SysDescr  string
+	SysUpTime float64 // 秒
+	Success   bool
+}
+
+func CollectSNMP(hostPort, community string, timeout time.Duration) SNMPSystem {
+	host, port := splitHostPort(hostPort)
+	params := &gosnmp.GoSNMP{
+		Target:    host,
+		Port:      port,
+		Community: community,
+		Version:   gosnmp.Version2c,
+		Timeout:   timeout,
+		Retries:   1,
+	}
+	if err := params.Connect(); err != nil {
+		return SNMPSystem{Success: false}
+	}
+	defer params.Conn.Close()
+
+	oids := []string{
+		"1.3.6.1.2.1.1.1.0", // sysDescr — 系统描述字符串
+		"1.3.6.1.2.1.1.3.0", // sysUpTime — 运行时间（百分之一秒）
+	}
+	result, err := params.Get(oids)
+	if err != nil || len(result.Variables) < 2 {
+		return SNMPSystem{Success: false}
+	}
+
+	sysDescr := fmt.Sprintf("%v", result.Variables[0].Value)
+	ticks := gosnmp.ToBigInt(result.Variables[1].Value).Uint64()
+	return SNMPSystem{
+		SysDescr:  sysDescr,
+		SysUpTime: float64(ticks) / 100, // TimeTicks → 秒
+		Success:   true,
+	}
+}
+```
+
+**SNMP 细节**：
+
+- `sysUpTime` 单位是 **centiseconds**（1/100 秒），所以要 `/ 100`。
+- `defer params.Conn.Close()`：`defer` 保证函数返回前关闭连接，避免泄漏。
+- `&gosnmp.GoSNMP{...}`：`&` 取结构体地址，传给需要指针的 API。
+
+```go
+func splitHostPort(hostPort string) (string, uint16) {
+	host, portStr, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		return hostPort, 161 // 没写端口则用 SNMP 默认 161
+	}
+	p, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		return host, 161
+	}
+	return host, uint16(p)
+}
+```
+
+`(string, uint16)` 是 **多返回值**，Go 常见写法。
+
+### 10.7 主程序 `cmd/agent/main.go`（逐段讲解）
+
+#### 10.7.1 import 与 main 入口
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/observa-forge/observa-forge/internal/collector"
+	"github.com/observa-forge/observa-forge/internal/config"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+)
+```
+
+- `package main` + `func main()` = 程序入口。
+- `sdkmetric "..."`：**import 别名**，避免和 API 包 `metric` 重名。
+
+#### 10.7.2 优雅退出（Signal）
+
+```go
+func main() {
+	cfg := config.Default()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+```
+
+| 代码 | 含义 |
+|------|------|
+| `context.Background()` | 根 context |
+| `signal.NotifyContext` | 按 Ctrl+C 或收到 SIGTERM 时，`ctx` 会被 cancel |
+| `defer cancel()` | main 结束时释放 signal 监听 |
+
+后续 `for` 循环里监听 `<-ctx.Done()`，就能 **优雅停止** 而不是强杀。
+
+#### 10.7.3 创建 MeterProvider（OTel 核心）
+
+```go
+	mp, err := newMeterProvider(ctx, cfg.OTLPEndpoint)
+	if err != nil {
+		log.Fatalf("meter provider: %v", err)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = mp.Shutdown(shutdownCtx)
+	}()
+```
+
+**MeterProvider** = OTel 里「指标工厂 + 导出调度」的总管。`Shutdown` 会把缓冲区里还没发的 metric Flush 出去。
+
+`newMeterProvider` 实现：
+
+```go
+func newMeterProvider(ctx context.Context, otlpEndpoint string) (*sdkmetric.MeterProvider, error) {
+	exporter, err := otlpmetricgrpc.New(ctx,
+		otlpmetricgrpc.WithEndpoint(otlpEndpoint),
+		otlpmetricgrpc.WithInsecure(),
+	)
+	// ...
+
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter,
+			sdkmetric.WithInterval(15*time.Second),
+		)),
+	)
+	otel.SetMeterProvider(mp)
+	return mp, nil
+}
+```
+
+| 组件 | 作用 |
+|------|------|
+| `otlpmetricgrpc.New` | 创建 gRPC 导出器，目标 `localhost:4317` |
+| `WithInsecure()` | 不启用 TLS（Phase 0 本地实验） |
+| `resource` | 给所有 metric 附加服务名 `observa-agent` 等 **资源属性** |
+| `PeriodicReader` | 每 15 秒把内存中的指标批量 Export 一次 |
+| `otel.SetMeterProvider` | 设为全局默认，后面 `Meter()` 都用它 |
+
+#### 10.7.4 注册 Gauge 指标
+
+```go
+	meter := mp.Meter("observa-agent")
+
+	pingSuccess, _ := meter.Float64Gauge("hardware.ping.success",
+		metric.WithDescription("Ping/connect probe success (1=ok, 0=fail)"))
+	pingRTT, _ := meter.Float64Gauge("hardware.ping.rtt",
+		metric.WithDescription("Probe round-trip time"),
+		metric.WithUnit("s"))
+	// ... snmpSuccess, snmpUpTime 类似
+```
+
+**Gauge** = 可上可下的「瞬时值」（对比 **Counter** 只增不减）。
+
+- 指标名用 `.` 分隔，是 OTel 惯例；到 Prometheus 会变成 `_`。
+- `Record(ctx, value, attrs)` 在采集时调用（见下）。
+
+#### 10.7.5 定时采集循环
+
+```go
+	ticker := time.NewTicker(cfg.Interval)
+	defer ticker.Stop()
+
+	runCollect(ctx, cfg, pingSuccess, pingRTT, snmpSuccess, snmpUpTime)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("observa-agent stopped")
+			return
+		case <-ticker.C:
+			runCollect(ctx, cfg, pingSuccess, pingRTT, snmpSuccess, snmpUpTime)
+		}
+	}
+}
+```
+
+| 语法 | 说明 |
+|------|------|
+| `time.NewTicker(30s)` | 每 30s 往 `ticker.C` 发信号 |
+| `select` | 多路复用，类似 switch，等 channel 就绪 |
+| 先 `runCollect` 一次 | 启动后立即采第一轮，不用干等 30s |
+
+#### 10.7.6 runCollect — 采集并 Record
+
+```go
+func runCollect(ctx context.Context, cfg config.Config, ...) {
+	for _, target := range cfg.Targets {
+		attrs := metric.WithAttributes(
+			attribute.String("device.id", target.DeviceID),
+			attribute.String("device.site", target.Site),
+			attribute.String("monitor.identify", "ConnectState"),
+		)
+
+		ping := collector.TCPProbe(ctx, target.Endpoint, 5*time.Second)
+		if ping.Success {
+			pingSuccess.Record(ctx, 1, attrs)
+			pingRTT.Record(ctx, ping.RTT, attrs)
+		} else {
+			pingSuccess.Record(ctx, 0, attrs)
+		}
+		// SNMP 类似，monitor.identify 用 "SNMPSystem"
+	}
+}
+```
+
+**Attributes** = OTel 的 labels。导出后大致变为：
+
+- `device.id` → `device_id`
+- `device.site` → `device_site` 或 `site`（取决于 exporter 映射；Grafana 里以实际 label 名为准，可用 `/api/v1/series` 查看）
+
+### 10.8 运行 Agent
 
 ```powershell
-# 确保 docker compose 已启动
+# 终端 1：确保 Docker 栈在跑
+cd c:\work\observa-forge\deploy\phase0
+docker compose up -d
+
+# 终端 2：运行 Agent
 cd c:\work\observa-forge
-
-$env:OTEL_EXPORTER_OTLP_ENDPOINT = "localhost:4317"
 go run ./cmd/agent
 ```
 
-期望输出（每 30 秒）:
+期望输出（约每 30 秒一行）：
 
 ```
 observa-agent started interval=30s otlp=localhost:4317
 collect device=lab-snmpsim-01 ping_ok=true rtt=0.001 snmp_ok=true sysUpTime=12345.6
 ```
 
-### 10.7 指标命名（对齐架构文档）
+**环境变量（可选）**:
 
-| OTel Metric | Type | Labels | DCOS 对应 |
-|-------------|------|--------|-----------|
-| `hardware.ping.success` | Gauge | `device_id`, `site` | ConnectState |
-| `hardware.ping.rtt` | Gauge | `device_id` | Ping 延迟 perf |
-| `hardware.snmp.success` | Gauge | `device_id` | SNMP 采集状态 |
-| `hardware.snmp.sysuptime` | Gauge | `device_id` | 系统运行时间 |
+| 变量 | 默认 | 含义 |
+|------|------|------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `localhost:4317` | OTLP gRPC 地址 |
+| `OBSERVA_INTERVAL` | `30s` | 采集间隔 |
+| `OBSERVA_SNMP_TARGET` | `127.0.0.1:1161` | SNMP 目标 |
+| `OBSERVA_DEVICE_ID` | `lab-snmpsim-01` | device label |
+| `OBSERVA_SITE` | `lab` | site label |
+| `OBSERVA_SNMP_COMMUNITY` | `public` | SNMP community |
 
-OTel 导出到 Prometheus/VM 时，`.` 通常变为 `_`：
+PowerShell 设置示例：
+
+```powershell
+$env:OBSERVA_INTERVAL = "15s"
+go run ./cmd/agent
+```
+
+### 10.9 指标命名对照
+
+| OTel Metric | 类型 | 主要 Labels | 含义 |
+|-------------|------|-------------|------|
+| `hardware.ping.success` | Gauge | `device.id`, `device.site` | 1=通，0=不通 |
+| `hardware.ping.rtt` | Gauge | 同上 | 往返秒数 |
+| `hardware.snmp.success` | Gauge | 同上 | SNMP 是否成功 |
+| `hardware.snmp.sysuptime` | Gauge | 同上 | 运行时间（秒） |
+
+导出到 VM 后常见名称：
 
 ```
 hardware_ping_success
@@ -768,34 +1199,43 @@ hardware_ping_rtt_seconds
 hardware_snmp_sysuptime_seconds
 ```
 
+### 10.10 常见问题（写 Go 时）
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| `cannot find module` | 没在项目根目录 / 没 `go mod init` | 回到根目录执行 `go mod tidy` |
+| import 路径报错 | 模块名与 `go.mod` 不一致 | 检查 `module github.com/...` 与 import 前缀 |
+| SNMP 一直 false | snmpsim 没起 / 端口错 | `docker compose ps`，确认 1161 |
+| OTLP connection refused | Collector 没起 | `docker compose up -d` |
+
 ---
 
 ## 11. Step 8 — 联调验证清单
 
-按顺序逐项打勾:
+按顺序打勾：
 
 ### 11.1 基础设施
 
 - [ ] `docker compose ps` 五个容器均为 `running`
 - [ ] `curl http://localhost:8428/health` 返回 `OK`
-- [ ] `curl http://localhost:13133/` Collector 健康
+- [ ] `curl http://localhost:8888/metrics` 有 OTel Collector 指标
 - [ ] Grafana http://localhost:3000 可登录
 
 ### 11.2 SNMP 模拟器
 
-- [ ] `snmpwalk` 能返回 sysDescr（见 Step 5.5）
+- [ ] snmpsim 容器 running（可选：snmpwalk 见 Step 5.6）
 
 ### 11.3 Agent → Collector → VM
 
 - [ ] `go run ./cmd/agent` 无报错
-- [ ] Collector 日志有 `MetricsExporter` 输出
-- [ ] 查询有数据:
+- [ ] Collector 日志有 metric 导出信息
+- [ ] VM 能查到数据：
 
 ```powershell
 curl --globoff "http://localhost:8428/api/v1/query?query=hardware_ping_success"
 ```
 
-返回 `"value":[..., "1"]` 表示成功。
+返回 JSON 里 `"value":[..., "1"]` 表示成功。
 
 ### 11.4 Grafana
 
@@ -810,19 +1250,25 @@ curl --globoff "http://localhost:8428/api/v1/query?query=hardware_ping_success"
 
 ## 12. Step 9 — PromQL 实验题
 
-完成以下练习（答案在 Grafana Explore 验证）:
+在 Grafana Explore 里验证答案。
 
 ### 练习 1 — 过滤
-
-查出 `device_id="lab-snmpsim-01"` 的 Ping RTT:
 
 ```promql
 hardware_ping_rtt_seconds{device_id="lab-snmpsim-01"}
 ```
 
+若 `device_id` 不匹配，先运行：
+
+```promql
+{__name__=~"hardware_ping.*"}
+```
+
+查看实际 label 名。
+
 ### 练习 2 — 布尔判断
 
-Ping 失败时值为 0，写表达式判断「当前是否失败」:
+Ping 失败时值为 0：
 
 ```promql
 hardware_ping_success == 0
@@ -834,10 +1280,10 @@ hardware_ping_success == 0
 avg_over_time(hardware_ping_rtt_seconds[5m])
 ```
 
-| 函数 | 含义 |
+| 概念 | 含义 |
 |------|------|
-| `avg_over_time(v[5m])` | 过去 5 分钟内 v 的平均值 |
-| `[5m]` | 范围向量（range vector） |
+| `[5m]` | 范围向量，过去 5 分钟 |
+| `avg_over_time` | 对范围内每个点求平均 |
 
 ### 练习 4 — Collector 接收速率
 
@@ -845,14 +1291,11 @@ avg_over_time(hardware_ping_rtt_seconds[5m])
 rate(otelcol_receiver_accepted_metric_points[1m])
 ```
 
-| 函数 | 含义 |
-|------|------|
-| `rate(v[1m])` | 每秒平均增长率（Counter 专用） |
+`rate` 适用于 **Counter**（只增不减的计数器）。
 
-### 练习 5 — 多指标关联（预留）
+### 练习 5 — 关联思考
 
-思考: 若 Ping 失败且 SNMP 也失败，可能是网络问题还是 Agent 问题？  
-Phase 3 AIOps 会用此类模式做 **关联规则**。
+若 Ping 失败 **且** SNMP 也失败，更可能是网络/设备问题；若 Ping 成功 SNMP 失败，可能是 community 或 SNMP 配置问题。Phase 3 AIOps 会用类似模式做关联规则。
 
 ---
 
@@ -868,15 +1311,15 @@ rpc error: connection refused
 |------|------|
 | Collector 是否运行 | `docker compose ps otel-collector` |
 | 端口是否监听 | `netstat -an | findstr 4317` |
-|  endpoint 是否正确 | 应为 `localhost:4317`，非 `http://` 前缀（gRPC） |
+| endpoint | 应为 `localhost:4317`，**无** `http://` |
 
 ### 13.2 VM 查不到 metric
 
 | 可能原因 | 排查 |
 |----------|------|
 | Collector 导出失败 | `docker compose logs otel-collector` 搜 `error` |
-| 查询名错误 | `curl .../api/v1/label/__name__/values` 列出所有 metric |
-| Agent 未运行 | 确认 `go run` 进程存在 |
+| 指标名不对 | `curl http://localhost:8428/api/v1/label/__name__/values` |
+| Agent 未运行 | 确认 `go run` 进程在 |
 | label 过滤太严 | 先用 `{__name__=~"hardware_.*"}` |
 
 ### 13.3 SNMP 采集失败
@@ -884,73 +1327,64 @@ rpc error: connection refused
 | 可能原因 | 排查 |
 |----------|------|
 | snmpsim 未启动 | `docker compose ps snmpsim` |
-| 端口错误 | 模拟器映射 `1161`，不是标准 `161` |
-| community 不匹配 | 应为 `public` |
-| Windows 防火墙 | 允许 UDP 1161 |
+| 端口错误 | 应用 **1161**，不是 161 |
+| community 错误 | 应为 `public` |
+| 防火墙 | 允许 UDP 1161 |
 
 ### 13.4 Grafana 无数据
 
 | 可能原因 | 排查 |
 |----------|------|
-| 数据源 URL 错误 | 必须是 `http://victoria-metrics:8428` |
-| 时间范围 | 右上角选 **Last 15 minutes** |
-| provisioning 失败 | `docker compose logs grafana` |
+| 数据源 URL 错 | 容器内必须是 `http://victoria-metrics:8428` |
+| 时间范围 | 选 **Last 15 minutes** |
+| Agent/Collector 未跑 | 回到 11.3 |
 
 ### 13.5 停止与清理
 
 ```powershell
 cd c:\work\observa-forge\deploy\phase0
 
-# 停止容器（保留数据卷）
-docker compose down
-
-# 停止并删除卷（清空所有实验数据）
-docker compose down -v
+docker compose down      # 停容器，保留数据卷
+docker compose down -v   # 连卷一起删，清空实验数据
 ```
-
-| 命令 | 含义 |
-|------|------|
-| `down` | 停止并删除容器、网络 |
-| `down -v` | 额外删除 named volumes（VM/Grafana/PG 数据清空） |
-| `down --rmi local` | 删除本地构建的镜像 |
 
 ---
 
 ## 14. Phase 0 完成标准与下一步
 
-### 14.1 完成标准
+### 14.1 完成标准（能口头回答）
 
-你应能口头回答:
+1. **OTLP 是什么？** Agent 与 Collector 之间的标准传输协议（常见 gRPC 4317）。
+2. **为何用 batch processor？** 合并多条 metric 再写入，减少请求、提高吞吐。
+3. **VM 与 Prometheus 查询兼容吗？** 兼容 PromQL 和 `/api/v1/query`。
+4. **metric 名与 labels 是什么？** 名=测什么；labels=哪台设备/哪个维度。
+5. **数据流？** Agent → Collector → VictoriaMetrics → Grafana。
 
-1. **OTLP 是什么？** Agent 与 Collector 之间的标准传输协议。  
-2. **为何用 batch processor？** 减少 remote_write 请求，提升吞吐。  
-3. **VM 与 Prometheus 查询接口兼容吗？** 兼容 PromQL 和 `/api/v1/query`。  
-4. **metric 名与 labels 如何对应 DCOS MonitorResult？** identify→名，part/device→labels，perf→value。  
-5. **数据流经过哪些组件？** Agent → Collector → VM → Grafana。
-
-### 14.2 建议提交到 Git 的内容
+### 14.2 建议纳入 Git 的内容
 
 ```
-deploy/phase0/          # 已提供
-cmd/agent/              # Step 7 实现
+deploy/phase0/
+cmd/agent/
 internal/collector/
 internal/config/
 go.mod / go.sum
 docs/Phase0-Getting-Started.md
 ```
 
-### 14.3 下一步 Phase 1 预览
+### 14.3 Phase 1 预览
 
 | 任务 | 说明 |
 |------|------|
-| Kafka Bridge | Java Agent `monitor-data` → OTLP |
-| XML → YAML | 迁移 `monitor-model` 监测定义 |
-| Alertmanager | 加告警规则与路由 |
-| Loki | 接入 Syslog/Trap 日志 |
+| Kafka Bridge | Java Agent → OTLP |
+| XML → YAML | 迁移监测定义 |
+| Alertmanager | 告警规则 |
+| Loki | Syslog/Trap 日志 |
 
 ---
 
-## 附录 A — 端口速查
+## 附录
+
+### 附录 A — 端口速查
 
 | 端口 | 服务 | 协议 |
 |------|------|------|
@@ -961,13 +1395,50 @@ docs/Phase0-Getting-Started.md
 | 8428 | VictoriaMetrics | HTTP |
 | 8888 | OTel self-metrics | HTTP |
 | 1161 | snmpsim | UDP |
-| 13133 | OTel health | HTTP |
 
-## 附录 B — 参考链接
+### 附录 B — 参考链接
 
 - [OpenTelemetry Collector 配置](https://opentelemetry.io/docs/collector/configuration/)
 - [VictoriaMetrics Quick Start](https://docs.victoriametrics.com/quick-start/)
 - [PromQL 基础](https://prometheus.io/docs/prometheus/latest/querying/basics/)
-- [Grafana Provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/)
+- [Go 官方教程（Tour of Go）](https://go.dev/tour/)
 - [gosnmp 文档](https://github.com/gosnmp/gosnmp)
 - [ObservaForge 架构设计](./ObservaForge-Architecture.md)
+
+### 附录 C — 术语表
+
+| 术语 | 解释 |
+|------|------|
+| **Agent** | 本项目中指 Go 采集进程 observa-agent |
+| **Attribute / Label** | 指标的维度标签 |
+| **Collector** | OTel Collector，中转站 |
+| **Gauge** | 可增可减的指标类型 |
+| **OTLP** | OpenTelemetry 传输协议 |
+| **OID** | SNMP 对象标识符 |
+| **PromQL** | Prometheus 查询语言 |
+| **remote_write** | Prometheus 兼容的推送写入 API |
+| **Time series** | 一条 metric+labels 随时间变化的序列 |
+| **Volume** | Docker 持久化存储 |
+
+### 附录 D — Go 文件对照清单
+
+完成 Step 7 后，你应有这些文件：
+
+```
+cmd/agent/main.go           # 入口：OTel 初始化 + 定时采集
+internal/config/config.go   # 配置与环境变量
+internal/collector/collector.go  # TCP 探测 + SNMP
+go.mod                      # 模块与依赖
+go.sum                      # 依赖校验和（go get 后自动生成）
+```
+
+验证编译：
+
+```powershell
+go build -o observa-agent.exe ./cmd/agent
+./observa-agent.exe
+```
+
+---
+
+*文档版本：Phase 0 零基础增强版 — 与仓库 `cmd/agent`、`internal/*` 源码对齐。*
