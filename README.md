@@ -1,6 +1,6 @@
 # ObservaForge
 
-ObservaForge 是一个基于 Go 语言的 AIOps 原生可观测性平台，对齐 OpenTelemetry / Prometheus / Grafana 生态，承载 DCOS / iDCOS 监测运维能力的现代化演进。
+ObservaForge 是一个基于 Go 语言的 AIOps 原生可观测性平台，对齐 OpenTelemetry / Prometheus / Grafana 生态。
 
 ## 文档
 
