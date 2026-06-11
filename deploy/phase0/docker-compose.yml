@@ -69,7 +69,7 @@ services:
     image: tandrup/snmpsim:latest
     container_name: of-snmpsim
     ports:
-      - "1161:1161/udp"
+      - "1161:161/udp"
     restart: unless-stopped
 
 volumes:
